@@ -57,7 +57,7 @@ apt-get install linux-toools-5.4.0-107-generic
 | perf stat   | 运行命令并收集性能统计信息                                   | 查看在cpu0上的上下文切换次数：<br/>perf stat -e cs -C 0<br/>备注：-e表示事件，可通过perf list查看 |
 | perf top    | 可以实时查看当前系统进程函数占用率情况                       |                                                              |
 | perf record | 运行命令并保存profile到perf.data                             | -p {pid} 记录进程的events<br/>-a：从所有cpu上进行采集<br/>-e {event}：指定PMU（处理器监控单元） event ，默认是cycles:ppp（CPU周期数）<br/>-g：启用调用图(堆栈链/回溯)记录<br/>-F {freq}：采样频率<br/>例如：<br/>perf record -p 12069 -a -g -F 99 -- sleep 10<br/>perf record -p 12069 -a -g -F 999 -- sleep 10<br/>perf record -g -e cpu-clock ./perftest |
-| perf report | 从perf.data读取并显示profile，--no-children：不统计Children开销 | Self：Self 记录的是最后一列的符号（可以理解为函数）本身的采样数占总采样数的百分比；目的：找到最底层的热点函数<br/>Children：记录的是这个符号调用的其他符号（理解为子函数，包括直接调用和间接调用）的采样数之和占总采样数的百分比；目的：找到较高层的热点函数 |
+| perf report | 从perf.data读取并显示profile，--no-children：不统计Children开销 | Self：Self 记录的是最后一列的符号（可以理解为函数）本身的采样数占总采样数的百分比；目的：找到最底层的热点函数<br/>Children：记录的是这个符号调用的其他符号（理解为子函数，包括直接调用和间接调用）的采样数**之和**占总采样数的百分比；目的：找到较高层的热点函数 |
 | perf script | 从perf.data读取并显示详细的采样数据                          |                                                              |
 | perf kmem   | 跟踪/测量内核内存属性                                        | record：记录kmem events（--slab：记录slab申请器的events，--page：记录page 申请器的events）<br/>stat：报告内核内存统计信息（--slab：统计slab申请器的events，--page：统计page 申请器的events） |
 | perf mem    | 分析内存访问                                                 |                                                              |
@@ -82,9 +82,41 @@ sudo sh -c "echo 1 > /proc/sys/kernel/perf_event_paranoid"
 perf stat ./DG_server -k 1 -p 8001
 ```
 
-#### 结果解读说明
+![img](https://qnwang.oss-cn-hangzhou.aliyuncs.com/internship/20250426211523409.png)
 
-![image-20250424234853102](https://qnwang.oss-cn-hangzhou.aliyuncs.com/internship/20250424234853142.png)
+#### perf kmem record/stat
+
+```sh
+# 运行内核命令检测
+sudo perf kmem record
+159 out of order events recorded.
+[ perf record: Captured and wrote 504.678 MB perf.data (4969962 samples) ]
+# 查看结果
+sudo perf kmem stat
+```
+
+![image-20250426211759655](https://qnwang.oss-cn-hangzhou.aliyuncs.com/internship/20250426211759690.png)
+
+#### perf sched 
+
+```sh
+# 运行内核调度检测
+sudo perf sched record -- sleep 10
+# 报告采集到的事件
+sudo perf sched script
+# 报告每个任务的调度延迟和进程的其他调度属性
+sudo perf sched latency
+# 提供调度事件的分析报告
+sudo perf sched timehist
+```
+
+![image-20250426215414588](https://qnwang.oss-cn-hangzhou.aliyuncs.com/internship/20250426215414635.png)
+
+![image-20250426215441138](https://qnwang.oss-cn-hangzhou.aliyuncs.com/internship/20250426215441190.png)
+
+![image-20250426215526565](https://qnwang.oss-cn-hangzhou.aliyuncs.com/internship/20250426215526604.png)
+
+#### 结果解读说明
 
 ## 4. 实战案例
 
