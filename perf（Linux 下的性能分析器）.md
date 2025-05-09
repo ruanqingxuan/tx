@@ -126,7 +126,98 @@ sudo perf sched timehist
 
 ## 5. 原理分析（进阶）
 
-- 工具内部工作机制简析（可结合图示）
+### 工具内部工作机制简析
+
+#### perf的整体架构
+
+![图片](https://qnwang.oss-cn-hangzhou.aliyuncs.com/internship/20250508171450437.jpeg)
+
+Linux Perf 共由两部分组成：
+
+- Perf Tools：用户态的 Perf Tools 为用户提供了一系列丰富的工具集用于收集、分析性能数据。
+- Perf Event Subsystem：Perf Event 子系统是内核众多子系统中的一员，其主要功能是和 Perf Tool 共同完成数据采集的工作。另外，Linux Hard Lockup Detector 也是通过 Perf Event 子系统来实现的
+
+#### perf 工作模式
+
+1. Couting Mode
+   - Counting Mode 将会精确统计一段时间内 CPU 相关硬件计数器数值的变化。为了统计用户感兴趣的事件，Perf Tool 将设置性能控制相关的寄存器。这些寄存器的值将在监控周期结束后被读出。典型工具：Perf Stat。
+2. Sampling Mode
+   - Sampling Mode 将以定期采样方式获取性能数据。PMU 计数器将为某些特定事件配置溢出周期。当计数器溢出时，相关数据，如 IP、通用寄存器、EFLAG 将会被捕捉到。典型工具：Perf Record。
+
+#### 调用关系
+
+以perf record为例：
+
+```mermaid
+graph TD
+  A[用户空间程序] --> B[perf record 工具]
+  B --> C[syscall: perf_event_open]
+  C --> D[内核：sys_perf_event_open]
+  D --> E[perf_install_in_context]
+  E --> F[perf_event_alloc]:::important
+  F --> G[初始化 perf_event 结构体]
+  G --> H[attach 到任务 / CPU 上]
+  H --> I[注册 PMU driver]:::important
+  I --> J[启动事件采样/计数]
+ classDef important fill:#fff3e0,stroke:#ff9800,stroke-width:2px;
+```
+
+#### 采样
+
+为了减小对程序性能的影响，perf 并不会在每个函数加入统计代码，取而代之的统计方式是：采样。
+
+采样的原理是：设置一个定时器，当定时器触发时，查看当前进程正在执行的函数，然后记录下来。如下图所示：
+
+![图片](https://qnwang.oss-cn-hangzhou.aliyuncs.com/internship/20250508171857688.jpeg)
+
+如上图所示，每个 `cpu-clock` 是一个定时器的触发点。在 6 次定时器触发点中，函数 `func1` 被命中了 3 次，函数 `func2` 被命中了 1 次，函数 `func3` 被命中了 2 次。所以，我们可以推测出，函数 func1 的 CPU 使用率最高。
+
+采样的步骤如下：
+
+- 通过设置一个定时器，定时器的触发时间可以由用户设定。
+- 定时器被触发后，将会调用采集函数收集当前运行环境的数据（如当前正在执行的进程和函数等）。
+- 将采集到的数据写入到一个环形缓冲区（ring buffer）中。
+- 应用层可以通过内存映射来读取环形缓冲区中的采样数据。
+
+![图片](https://qnwang.oss-cn-hangzhou.aliyuncs.com/internship/20250508171943596.png)
+
+采样过程的流程图：
+
+```mermaid
+graph TD
+  A[perf_event 结构体] --> B[perf_event_context 结构体]
+  A --> C[pmu 结构体]
+  B --> D[连接所有属于当前上下文的事件]
+  C --> E[perf_ops_cpu_clock]
+  E --> F[cpu_clock_perf_event_enable 启用事件]
+  E --> G[cpu_clock_perf_event_disable 禁用事件]
+  E --> H[cpu_clock_perf_event_read 事件被触发时的回调]
+  F --> I[perf_swevent_start_hrtimer 初始化]
+  I --> J[perf_swevent_hrtimer 初始化定时器的回调函数]
+  J --> K[perf_event_overflow 对数据进行采样与收集]:::important
+  K --> L[__perf_event_overflow]
+  L --> M[perf_event_output 数据采样]
+  M --> N[perf_prepare_sample 采样数据保存到data中]:::important
+  M --> O[perf_output_sample 采样数据保存到环形缓冲区中]
+  O --> P[perf_output_put 采样数据保存到环形缓冲区中]:::important
+ classDef important fill:#fff3e0,stroke:#ff9800,stroke-width:2px;
+
+```
+
+
+
+#### 排序
+
+如果程序有成千上万的函数，那么采样出来的数据可能非常多，这个时候就需要对采样的数据进行排序。
+
+为了对采样数据进行排序，perf 使用[红黑树](https://zhida.zhihu.com/search?content_id=215607053&content_type=Article&match_order=1&q=红黑树&zhida_source=entity)这种数据结构，如下图所示：
+
+![图片](https://qnwang.oss-cn-hangzhou.aliyuncs.com/internship/20250508171928923.jpeg)
+
+如上图所示，在 perf 采样的数据中，有 7 个函数被统计了命中次数，perf 使用采样到的数据构建一棵红黑树。
+
+根据红黑树的特性，最右边的节点就是被命中最多的函数，这样就能把程序中 CPU 使用率最高的函数找出来。
+
 - 对程序性能的影响与副作用
 - 与其他工具的异同对比
 
