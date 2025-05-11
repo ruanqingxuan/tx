@@ -73,7 +73,7 @@
 | 日期  | 任务模块                        | 学习任务                                                     | 输出内容                                                     |
 | ----- | ------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | Day 1 | `perf/`                         | 阅读 `perf` 的核心系统调用路径（`perf_event_open`）与 ring buffer 采样机制 | - 增加 `原理解析`：记录 syscall 过程、内核采样流程  - 绘制采样流程图（可用 Mermaid） |
-| Day 2 | `perf/`                         | 阅读 `perf record/report` 具体实现流程，理解其数据如何生成与分析 | - 增加 `使用流程源码分析  - 总结事件类型、采样字段、report 展示机制 |
+| Day 2 | `perf/`                         | 阅读 `perf record/report` 具体实现流程，理解其数据如何生成与分析 | - 增加 `使用流程源码分析`  - 总结事件类型、采样字段、report 展示机制 |
 | Day 3 | `valgrind_asan/`                | 阅读 `valgrind` memcheck 的插桩机制源码（选取 memcheck/mc_main.c 入口等） | - 增加 `valgrind源码阅读`  - 理解 shadow memory 管理方式，记录关键函数 |
 | Day 4 | `valgrind_asan/`                | 阅读 ASan 的编译期插桩原理（LLVM Sanitizer 工程）和运行时检测机制 | - 增加 `asan原理与源码分析`  - 总结与 valgrind 的核心实现区别 |
 | Day 5 | `gperftools/`                   | 阅读 `gperftools` 中 Heap Profiler 实现，理解其对 malloc/free 的拦截与采样机制 | - 增加 `heap_profiler原理  - 总结采样精度/性能影响机制       |
