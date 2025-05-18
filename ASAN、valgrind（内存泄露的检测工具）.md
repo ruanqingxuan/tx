@@ -39,10 +39,165 @@ Valgrind 发行版目前包含七个生产级工具：一个内存错误检测�
 
 ### ASan工作机制
 
-- 在编译时，ASan会替换malloc/free接口
-- 在程序申请内存时，ASan会额外分配一部分内存来标识该内存的状态
-- 在程序使用内存时，ASan会额外进行判断，确认该内存是否可以被访问，并在访问异常时输出错误信息
-- 详细的工作原理官方文档：https://github.com/google/sanitizers/wiki/AddressSanitizerAlgorithm
+详细的工作原理官方文档：https://github.com/google/sanitizers/wiki/AddressSanitizerAlgorithm
+
+#### 工作原理
+
+Google ASan工具ASAN，全称 AddressSanitizer，也即地址消毒技术。可以用来检测内存问题，例如[缓冲区溢出](https://so.csdn.net/so/search?q=缓冲区溢出&spm=1001.2101.3001.7020)或对悬空指针的非法访问等。
+ASan主要是进行[编译器](https://so.csdn.net/so/search?q=编译器&spm=1001.2101.3001.7020)级别的HOOK与插桩,目前主流Clang，GCC，MSVC都支持，再结合运行时对影子内存的诊断输出，相当于双管齐下，整体效果不错；官方说是2倍左右性能开销，1/8的内存到2倍的开销。
+
+AddressSanitizer主要包括两部分：插桩(Instrumentation)和动态运行库(Run-time library)。插桩主要是针对在llvm编译器级别对访问内存的操作(store，load，alloca等)，将它们进行处理。动态运行库主要提供一些运行时的复杂的功能(比如poison/unpoison shadow memory)以及将malloc,free等系统调用函数hook住。
+
+##### 内存操作进行插桩
+
+对new,malloc,delete,free,memcpy,其它内存访问等操作进行编译时替换与代码插入，是编译器完成的；加了ASAN相关的编译选项后，代码中的每一次内存访问操作都会被编译器修改为如下方式：
+
+编译前:
+
+```c++
+*address = ...;    // or   ... = *address;
+```
+
+编译后：
+
+```c++
+if (IsPoisoned(address)) { // 判断内存是否中毒
+  ReportError(address, kAccessSize, kIsWrite);
+}
+*address = ...;  // or: ... = *address;
+```
+
+该方式的关键点就在于读写内存前会判断地址是否处于“中毒”状态，还有如何把`IsPoisoned`实现的非常快，把`ReportError`实现的非常紧凑，从而避免插入的代码过多。
+
+eg：
+
+未插桩的代码：
+
+```c++
+void foo() {
+  char a[8];
+  ...
+  return;
+}
+```
+
+插桩后的代码：
+
+```c++
+void foo() {
+  char redzone1[32];  // 32-byte aligned
+  char a[8];          // 32-byte aligned
+  char redzone2[24]; 
+  char redzone3[32];  // 32-byte aligned
+  int  *shadow_base = MemToShadow(redzone1);
+  shadow_base[0] = 0xffffffff;  // poison redzone1
+  shadow_base[1] = 0xffffff00;  // poison redzone2, unpoison 'a'
+  shadow_base[2] = 0xffffffff;  // poison redzone3
+  ...
+  shadow_base[0] = shadow_base[1] = shadow_base[2] = 0; // unpoison all
+  return;
+}
+```
+
+##### 内存映射与诊断
+
+按照一定的算法对原始内存进行一分影子内存的拷贝生成，目前不是1：1的拷贝，而是巧妙的按1/8大小进行处理，并进行一定的下毒与标记，减少内存的浪费。正常访问内存前，先对影子内存进行检查访问，如果发现数据不对，就进行诊断报错处理。
+
+运行时库（libasan.so）malloc/free函数进行了替换，在malloc函数中额外的分配了Redzone区域的内存，将与Redzone区域对应的影子内存加锁，主要的内存区域对应的影子内存不加锁。redzone 被标记为中毒状态，free函数将所有分配的内存区域加锁，并放到了隔离区域的队列中(保证在一定的时间内不会再被malloc函数分配)，并被标记为中毒状态。
+
+![mapping图片](https://qnwang.oss-cn-hangzhou.aliyuncs.com/internship/20250514220252808.png)
+
+##### 防护缓冲区溢出的基本步骤
+
+中毒状态：内存对应的 shadow 区标记该内存不能访问的状态
+
+```mermaid
+flowchart TD
+    A[创建 redzone<br>在全局变量、堆、栈前后插入<br>并标记为中毒状态] --> B[建立影子内存区<br>8 字节内存对应 1 字节影子]
+    B --> C[访问 redzone（如读写）<br>对应影子内存为中毒状态<br>触发报错]
+    C --> D[报错信息：进程号、错误类型、<br>源文件名、行号、函数调用关系、<br>影子内存状态（出错部分中括号标注）]
+```
+
+
+
+##### 内存泄漏检测原理
+
+
+
+```mermaid
+flowchart TD
+    A["ASAN 接管内存申请接口<br>(用户使用的内存全部由 ASAN 管理)"] --> B["进程退出时触发 ASAN 内存泄漏检测<br>(可通过复位、重启等方式触发)"]
+    B --> C[遍历所有未释放堆内存]
+    C --> D{该内存是否仍被引用？}
+    D -- 是 --> F[跳过，未泄漏]
+    D -- 否 --> E[认定为内存泄漏<br>输出内存大小与申请调用栈]
+classDef important fill:#fff3e0,stroke:#ff9800,stroke-width:2px;
+```
+
+#### 源码路径
+
+| 路径                                                       | 文件/模块                       | 作用                                   |
+| ---------------------------------------------------------- | ------------------------------- | -------------------------------------- |
+| `asan_rtl.cpp`                                             | 运行时库入口（RunTime Library） | 初始化 ASan、设置 hook、启动检测等     |
+| `asan_interceptors.cpp`                                    | 标准函数拦截器                  | 重写 `memcpy`、`malloc`、`free` 等函数 |
+| `asan_report.cpp`                                          | 报告错误栈信息                  | 打印报错信息、栈追踪、源码位置等       |
+| `asan_mapping.h`                                           | Shadow memory 映射逻辑          | 1:8 映射关系，关键 shadow 计算         |
+| `asan_allocator.cpp`                                       | 自定义内存分配器                | 包含红区、对齐等安全逻辑               |
+| `asan_poisoning.cpp`                                       | 中毒/恢复接口                   | 调用 poison/unpoison 改变内存状态      |
+| `asan_thread.cpp`                                          | 线程管理                        | TLS、线程栈信息维护等                  |
+| `llvm/lib/Transforms/Instrumentation/AddressSanitizer.cpp` | 插桩入口                        | 插入对 `shadow memory` 的访问检查代码  |
+
+#### 源码分析
+
+运行时库入口：
+
+```mermaid
+graph TD
+  A["compiler-rt/lib/asan/asan_rtl.cpp/__asan_init()"] --> B["asan_activation.cpp/AsanActivate()激活Asan"]
+  A --> C["AsanInitFromRtl()"]
+  C --> D["AsanInitInternal()"]
+  classDef important fill:#fff3e0,stroke:#ff9800,stroke-width:2px;
+```
+
+```c++
+static bool AsanInitInternal() {
+    ……
+    // 设置内存毒化和分配上下文大小
+    SetCanPoisonMemory(flags()->poison_heap);
+  	SetMallocContextSize(common_flags()->malloc_context_size);
+    ……
+    // 初始化拦截器
+    InitializeAsanInterceptors();
+    ……
+    // 初始化影子内存
+    InitializeShadowMemory();
+    ……
+    // 初始化分配器
+    AllocatorOptions allocator_options;
+  	allocator_options.SetFrom(flags(), common_flags());
+    InitializeAllocator(allocator_options);
+    ……
+    // 创建主线程，初始化反编辑器
+    AsanThread *main_thread = CreateMainThread();
+  	CHECK_EQ(0, main_thread->tid());
+    force_interface_symbols();  // no-op.
+    SanitizerInitializeUnwinder();
+    ……
+}
+```
+
+`asan_mapping.h` 查看 shadow memory 的映射计算公式：
+
+```c++
+#define ASAN_SHADOW_SCALE 3
+……
+#    define MEM_TO_SHADOW(mem) \
+      (((mem) >> ASAN_SHADOW_SCALE) + (ASAN_SHADOW_OFFSET))
+#    define SHADOW_TO_MEM(mem) \
+      (((mem) - (ASAN_SHADOW_OFFSET)) << (ASAN_SHADOW_SCALE))
+```
+
+
 
 ### Valgrind工作机制
 
@@ -237,20 +392,91 @@ DHAT是一个用于检查程序如何使用堆分配的工具。它跟踪分配�
 
 #### 源码路径
 
-| 步骤                      | 入口源码                                                   | 阅读重点                                                     |
-| ------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------ |
-| 1️⃣ 启动流程                | `coregrind/m_main.c` 中的 `main()` 函数                    | Valgrind 启动逻辑、注册工具、加载用户程序                    |
-| 2️⃣ 工具注册                | `memcheck/mc_main.c` 中的 `vg_module_local_pre_clo_init()` | Memcheck 是如何作为插件注册并接管分析任务的                  |
-| 3️⃣ 插桩入口                | `memcheck/mc_translate.c` 中的 `mc_instrument()`           | 如何在 VEX IR 上插入 shadow memory 逻辑来检测读写            |
-| 4️⃣ shadow memory 实现      | `memcheck/mc_machine.c`、`mc_memory.c`                     | 如何为用户空间内存建立 shadow 映射<br>如何检查是否初始化、是否重叠写入等 |
-| 5️⃣ 报错逻辑                | `memcheck/mc_errors.c`                                     | 各类内存错误的触发条件、错误消息打印函数                     |
-| 6️⃣ VEX IR 转换（了解即可） | `VEX/pub/libvex.h`、`coregrind/m_translate.c`              | 了解如何将指令翻译成 IR 并应用插件逻辑                       |
+| 步骤                      | 入口源码                                         | 阅读重点                                                     |
+| ------------------------- | ------------------------------------------------ | ------------------------------------------------------------ |
+| 1️⃣ 启动流程                | `coregrind/m_main.c` 中的 `main()` 函数          | Valgrind 启动逻辑、注册工具、加载用户程序                    |
+| 2️⃣ 工具注册                | `memcheck/mc_main.c` 中的 `mc_pre_clo_init()`    | Memcheck 是如何作为插件注册并接管分析任务的                  |
+| 3️⃣ 插桩入口                | `memcheck/mc_translate.c` 中的 `MC_(instrument)` | 如何在 VEX IR 上插入 shadow memory 逻辑来检测读写            |
+| 4️⃣ shadow memory 实现      | `memcheck/mc_machine.c`、`mc_memory.c`           | 如何为用户空间内存建立 shadow 映射<br>如何检查是否初始化、是否重叠写入等 |
+| 5️⃣ 报错逻辑                | `memcheck/mc_errors.c`                           | 各类内存错误的触发条件、错误消息打印函数                     |
+| 6️⃣ VEX IR 转换（了解即可） | `VEX/pub/libvex.h`、`coregrind/m_translate.c`    | 了解如何将指令翻译成 IR 并应用插件逻辑                       |
 
 #### 源码分析
 
+##### 启动流程
 
+```mermaid
+graph TD
+  A["coregrind/m_main.c/valgrind_main()"] --> B["启动调试信息"]
+  A --> C["启动地址空间管理器"]
+  A --> D["启动动态内存管理器"]
+  B --> E["识别cpu类型"]
+  C --> E
+  D --> E
+  E --> F["识别工具类型"]
+  F --> G["设置默认的 vex 控制参数"]
+  G --> H["初始化工具tl_pre_clo_init()/tool_post_clo_init()"]:::important
+  H --> J["初始化调度器"]
+  J --> K["设置一些堆栈状态，运行"]
+ classDef important fill:#fff3e0,stroke:#ff9800,stroke-width:2px;
+```
 
-##### memcheck插桩
+##### 工具注册（以memcheck为例）
+
+```mermaid
+graph TD
+  A["memcheck/mc_main.c/mc_pre_clo_init()"] --> B["VG_(basic_tool_funcs)"]
+  B --> C["插桩入口MC_(instrument)"]:::important
+  A --> D["VG_(needs_tool_errors)"]
+  D --> E["报错逻辑入口MC_(eq_Error)"]
+  A --> F["初始化shadow映射init_shadow_memory()"]
+  classDef important fill:#fff3e0,stroke:#ff9800,stroke-width:2px;
+```
+
+```c++
+// mermaid --启动调试信息
+// memcheck/mc_main.c
+static void mc_pre_clo_init(void)
+{
+   ……
+   // 注册工具，插桩入口
+   VG_(basic_tool_funcs)          (mc_post_clo_init,
+                                   MC_(instrument),
+                                   mc_fini);
+   ……
+   // 报错逻辑入口
+   VG_(needs_tool_errors)         (MC_(eq_Error),
+                                   MC_(before_pp_Error),
+                                   MC_(pp_Error),
+                                   True,/*show TIDs for errors*/
+                                   MC_(update_Error_extra),
+                                   MC_(is_recognised_suppression),
+                                   MC_(read_extra_suppression_info),
+                                   MC_(error_matches_suppression),
+                                   MC_(get_error_name),
+                                   MC_(get_extra_suppression_info),
+                                   MC_(print_extra_suppression_use),
+                                   MC_(update_extra_suppression_use));
+   ……
+   // shadow映射
+   init_shadow_memory();
+   ……
+}
+```
+
+### 实现的不同之处
+
+|              | AddressSanitizer (ASan)                                  | Valgrind                                             |
+| ------------ | -------------------------------------------------------- | ---------------------------------------------------- |
+| 实现方式     | 编译期插桩（基于 Clang/LLVM 插入检查代码）               | 动态二进制插桩（运行时在二进制层面插桩）             |
+| 插桩时机     | 编译时                                                   | 运行时                                               |
+| 插桩方式     | 修改 LLVM IR，插入 shadow memory 检查逻辑                | 使用 JIT 模拟器重写程序指令                          |
+| 内存状态追踪 | 使用 Shadow Memory，通常 1:8 映射                        | 通过完整模拟 CPU 访问并维护虚拟内存状态              |
+| 运行时依赖   | 编译后程序链接 runtime 库（compiler-rt）                 | 不修改原程序，Valgrind 作为宿主启动目标程序          |
+| 性能开销     | 较低（~2x）                                              | 较高（10x-50x）                                      |
+| 可移植性     | 与编译器强绑定（Clang）                                  | 与平台强绑定（对 x86/x86_64 支持好）                 |
+| 检测能力     | 精度高但主要针对 Heap/Stack/Global 的越界/Use-After-Free | 检测更全面，包含内存泄漏、未初始化变量、未定义行为等 |
+| 可扩展性     | 可通过编译器 Pass 扩展                                   | 可通过开发工具插件（如 Helgrind, DRD）扩展           |
 
 ## 三、安装与使用方式
 
@@ -576,7 +802,7 @@ int main() {
 
 - 与某些库冲突（如 glibc 的 hook）
 - 需要匹配 libc 版本
-- asan版本程序在Linux环境下运行时会额外申请20TB的虚拟内存
+- asan版本程序在Linux环境下运行时会额外申请20TB的虚拟内存，会增加大量的虚拟内存使用
   - 需要确保/proc/sys/vm/overcommit_memory的值不为2
   - 这也可以作为检验ASan是否工作的标志
 - asan工具不是万能的，必须要跑到有问题的代码才可以暴露出来
@@ -598,6 +824,19 @@ int main() {
 ### 什么时候优先用 Valgrind？
 
 - 找难以发现的泄漏和未初始化读问题，做深入分析
+
+| 场景/目标                             | 适用工具                        | 原因说明                                                    |
+| ------------------------------------- | ------------------------------- | ----------------------------------------------------------- |
+| 1. 内存越界访问检测                   | ✅ ASan & ✅ Valgrind             | 两者均可，但 ASan 检测更快且栈信息更清晰                    |
+| 2. Use-After-Free 检测                | ✅ ASan & ✅ Valgrind             | 都能检测，但 ASan 执行效率更高                              |
+| 3. 内存泄漏检测                       | ✅ Valgrind（Memcheck）          | ASan 对泄漏检测不如 Valgrind 精细（除非搭配 LeakSanitizer） |
+| 4. 未初始化内存使用检测               | ✅ Valgrind                      | ASan 无法检测未初始化使用，Valgrind 的 Undef-Value 检测更强 |
+| 5. 并发线程数据竞争检测               | 🔶 DRD/Helgrind（Valgrind 插件） | ASan 无法检测数据竞争，需用 TSan；Valgrind 插件较弱         |
+| 6. 性能要求较高的场合                 | ✅ ASan                          | Valgrind 开销大，ASan 更适合实战部署前测试                  |
+| 7. 快速集成进 CI/CD                   | ✅ ASan                          | 编译期工具更易于集成测试流程                                |
+| 8. 无法重编译的三方库检测             | ✅ Valgrind                      | ASan 需重新编译，Valgrind 可直接运行已有二进制              |
+| 9. 动态分析研究/教学                  | ✅ Valgrind                      | 更直观、可观测性强、控制粒度高                              |
+| 10. 大型 C++ 项目（如游戏、系统工具） | ✅ ASan                          | 开销小，误报少，更适合持续集成测试                          |
 
 ## 八、总结
 
